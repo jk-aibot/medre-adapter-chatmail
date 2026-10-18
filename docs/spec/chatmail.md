@@ -10,7 +10,7 @@ MUST remain importable without the SDK.
 Runtime MUST use an explicitly selected configured account and an allowlist of
 accepted ordinary chats. A profile MUST have one MEDRE owner. Configuration
 loading and runtime preflight MUST NOT provision accounts or create directories.
-Profile provisioning is an explicit operator action. Native client and server versions
+`init` is the explicit provisioning boundary. Native client and server versions
 MUST agree with the native core version returned by the running server.
 
 ## Identity and ingress

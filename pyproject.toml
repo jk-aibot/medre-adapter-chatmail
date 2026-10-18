@@ -12,6 +12,9 @@ dependencies = [
   "deltachat-rpc-server==2.63.0",
 ]
 
+[project.scripts]
+medre-chatmail = "medre.adapters.chatmail.cli:main"
+
 [project.entry-points."medre.adapters"]
 chatmail = "medre.adapters.chatmail.plugin:adapter_spec"
 
