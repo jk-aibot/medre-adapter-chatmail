@@ -162,6 +162,8 @@ class NativeSession:
             ]
         if name == "get_message":
             return self.messages[args[1]]
+        if name == "download_full_message":
+            return None
         if name == "get_connectivity":
             return self.connectivity
         if name == "send_msg":

@@ -106,3 +106,44 @@ def test_noninteractive_qr_requires_explicit_stdin(monkeypatch):
     assert (
         read_qr(parser().parse_args(["init", "--qr-stdin"])) == "DCACCOUNT:relay.test"
     )
+
+
+async def test_join_timeout_reports_pending_chat_id(config, monkeypatch):
+    from dataclasses import replace
+
+    session = NativeSession(config)
+    original = session.call
+
+    async def call(name, *args):
+        if name == "secure_join":
+            return 17
+        if name == "can_send":
+            return False
+        return await original(name, *args)
+
+    session.call = call
+    monkeypatch.setattr(
+        "medre.adapters.chatmail.cli.read_qr", lambda _: "OPENPGP4FPR:test"
+    )
+    with pytest.raises(ValueError, match="pending for chat 17"):
+        await execute(
+            parser().parse_args(["join"]),
+            replace(config, rpc_timeout_seconds=0.015),
+            session_factory=lambda _: session,
+        )
+    assert not session.started
+
+
+def test_log_and_idle_batches_do_not_trigger_full_history_scans():
+    from medre.adapters.chatmail.session import _should_wake
+
+    assert not _should_wake(
+        [
+            {"event": {"kind": "Info", "msg": "diagnostic"}},
+            {"event": {"kind": "ImapInboxIdle"}},
+        ]
+    )
+    assert _should_wake([{"event": {"kind": "IncomingMsg", "chatId": 10}}])
+    assert _should_wake([{"event": {"kind": "SmtpMessageSent"}}])
+    assert _should_wake([{"event": {"kind": "NewMessageType"}}])
+    assert _should_wake([None])

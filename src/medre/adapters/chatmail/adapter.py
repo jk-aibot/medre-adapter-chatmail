@@ -98,6 +98,7 @@ class ChatmailAdapter(AdapterContract):
         self._stopping = False
         self._failed_ingress = 0
         self._reconnects = 0
+        self._download_requests: set[tuple[int, int]] = set()
 
     async def start(self, ctx: AdapterContext) -> None:
         if self.session is not None:
@@ -158,7 +159,10 @@ class ChatmailAdapter(AdapterContract):
             )
         self._profile = profile
         self.codec = ChatmailCodec(self.config, profile)
-        self._cursors.clear()
+        # Keep the previous snapshot intact until every native conversation is
+        # validated and network I/O is successfully re-enabled.
+        cursors: dict[int, int] = {}
+        recovery_heads: dict[int, int] = {}
         for conversation in self.config.chats:
             info = await self.session.call("get_basic_chat_info", account, conversation)
             if (
@@ -182,11 +186,13 @@ class ChatmailAdapter(AdapterContract):
             ids = await self.session.call(
                 "get_message_ids", account, conversation, False, False
             )
-            self._recovery_heads[conversation] = max(ids, default=0)
+            recovery_heads[conversation] = max(ids, default=0)
             if checkpoint is None:
                 # I/O is stopped while first-use baselines are established.
-                self._cursors[conversation] = max(ids, default=0)
-                await self._checkpoint(conversation, self._cursors[conversation])
+                cursors[conversation] = max(ids, default=0)
+                await self._checkpoint(
+                    conversation, cursors[conversation], update_cursor=False
+                )
             else:
                 try:
                     metadata = json.loads(checkpoint.metadata_json)
@@ -199,57 +205,93 @@ class ChatmailAdapter(AdapterContract):
                     raise AdapterPermanentError(
                         "Chatmail checkpoint belongs to a different native profile"
                     )
-                self._cursors[conversation] = cursor
+                cursors[conversation] = cursor
         await self.session.call("start_io", account)
+        self._cursors = cursors
+        self._recovery_heads = recovery_heads
+        self._download_requests.clear()
         self.session.wake.set()
 
-    async def _checkpoint(self, conversation: int, cursor: int) -> None:
+    async def _checkpoint(
+        self, conversation: int, cursor: int, *, update_cursor: bool = True
+    ) -> None:
         await self.ctx.commit_checkpoint(
             f"chatmail:{self.config.account_id}:{conversation}",
             str(cursor),
             json.dumps({"profile_id": self._profile}),
         )
-        self._cursors[conversation] = cursor
+        if update_cursor:
+            self._cursors[conversation] = cursor
 
     async def _scan(self) -> None:
+        first_error: Exception | None = None
         for conversation in self.config.chats:
-            ids = await self.session.call(
-                "get_message_ids", self.config.account_id, conversation, False, False
+            try:
+                await self._scan_chat(conversation)
+            except (asyncio.CancelledError, SessionError, AdapterPermanentError):
+                raise
+            except Exception as exc:
+                # A failed durable admission/checkpoint must not prevent the
+                # other configured chats from making forward progress.
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    async def _scan_chat(self, conversation: int) -> None:
+        ids = await self.session.call(
+            "get_message_ids", self.config.account_id, conversation, False, False
+        )
+        pending = sorted(i for i in ids if i > self._cursors[conversation])
+        if len(pending) > 32:
+            self.session.wake.set()
+        for message_id in pending[:32]:
+            snapshot = await self.session.call(
+                "get_message", self.config.account_id, message_id
             )
-            pending = sorted(i for i in ids if i > self._cursors[conversation])
-            if len(pending) > 32:
-                self.session.wake.set()
-            for message_id in pending[:32]:
-                snapshot = await self.session.call(
-                    "get_message", self.config.account_id, message_id
+            if snapshot.get("chatId") != conversation:
+                raise SessionError(
+                    "Chatmail message changed conversation during admission"
                 )
-                if snapshot.get("chatId") != conversation:
-                    raise SessionError(
-                        "Chatmail message changed conversation during admission"
-                    )
-                # A partial text message may become complete using the same
-                # native ID. Keep its cursor pending rather than lose it.
-                if (
-                    snapshot.get("viewType") == "Text"
-                    and snapshot.get("downloadState") != "Done"
-                ):
-                    break
-                event = self.codec.decode(snapshot, timestamp=self.ctx.clock())
-                if event is not None:
-                    try:
-                        provenance = (
-                            "recovered"
-                            if message_id <= self._recovery_heads[conversation]
-                            else "live"
+            # A partial text message may become complete using the same
+            # native ID. Keep its cursor pending rather than lose it.
+            if snapshot.get("viewType") == "Text":
+                download = snapshot.get("downloadState")
+                if download == "Undecipherable":
+                    # Native content is terminally unreadable; do not block
+                    # newer items forever waiting for an impossible download.
+                    await self._checkpoint(conversation, message_id)
+                    continue
+                if download != "Done":
+                    # Available content needs an explicit native download. A
+                    # successful request produces a MsgsChanged notification;
+                    # never spin on every poll while it is in flight.
+                    key = (conversation, message_id)
+                    if download == "Available" and key not in self._download_requests:
+                        await self.session.call(
+                            "download_full_message", self.config.account_id, message_id
                         )
-                        await self.admit_inbound(event, provenance)
-                    except Exception:
-                        self._failed_ingress += 1
-                        raise
-                # Unsupported controls/media do not enter message history.
-                # Admission and checkpoint failures leave this ID retryable.
-                await self._checkpoint(conversation, message_id)
-                await asyncio.sleep(0)
+                        self._download_requests.add(key)
+                    if download == "Failure":
+                        self._download_requests.discard(key)
+                    break
+                self._download_requests.discard((conversation, message_id))
+            event = self.codec.decode(snapshot, timestamp=self.ctx.clock())
+            if event is not None:
+                try:
+                    provenance = (
+                        "recovered"
+                        if message_id <= self._recovery_heads[conversation]
+                        else "live"
+                    )
+                    await self.admit_inbound(event, provenance)
+                except Exception:
+                    self._failed_ingress += 1
+                    raise
+            # Unsupported controls/media do not enter message history.
+            # Admission and checkpoint failures leave this ID retryable.
+            await self._checkpoint(conversation, message_id)
+            await asyncio.sleep(0)
 
     async def deliver(self, result: RenderingResult) -> AdapterHandoffResult:
         conversation, text = validate_payload(result, self.config)
@@ -303,44 +345,52 @@ class ChatmailAdapter(AdapterContract):
         for row in await asyncio.to_thread(self.journal.rows):
             provenance = self.journal.provenance(row)
             if row["status"] == "queued":
-                await asyncio.to_thread(
-                    self.journal.update, row["identity"], "submitting"
-                )
-                # Commit the claim before invoking the external native core.
-                # A crash before correlating its reply is terminal uncertainty,
-                # never permission to send the same attempt a second time.
-                if row["chat"] not in self.config.chats:
+                # No native handoff has occurred yet. Check deterministically
+                # before committing a potentially-uncertain submission claim.
+                rejected = row["chat"] not in self.config.chats
+                if not rejected:
+                    members = await self.session.call(
+                        "get_chat_contacts", self.config.account_id, row["chat"]
+                    )
+                    rejected = not any(
+                        type(member) is int and member > 9 for member in members
+                    )
+                if rejected:
                     await asyncio.to_thread(
-                        self.journal.update, row["identity"], "abandoned"
+                        self.journal.update, row["identity"], "rejected"
                     )
-                    self.session.wake.set()
-                    continue
-                members = await self.session.call(
-                    "get_chat_contacts", self.config.account_id, row["chat"]
-                )
-                if not any(type(member) is int and member > 9 for member in members):
+                    row["status"] = "rejected"
+                else:
                     await asyncio.to_thread(
-                        self.journal.update, row["identity"], "abandoned"
+                        self.journal.update, row["identity"], "submitting"
                     )
-                    self.session.wake.set()
-                    continue
-                try:
-                    message_id = await self.session.call(
-                        "send_msg",
-                        self.config.account_id,
-                        row["chat"],
-                        {"text": row["body"]},
+                    # Commit the claim immediately before invoking native send.
+                    # A crash or RPC rejection after this point is uncertain.
+                    try:
+                        message_id = await self.session.call(
+                            "send_msg",
+                            self.config.account_id,
+                            row["chat"],
+                            {"text": row["body"]},
+                        )
+                    except RpcCallError:
+                        self.session.wake.set()
+                        continue
+                    if type(message_id) is not int or message_id <= 9:
+                        raise SessionError(
+                            "Chatmail returned an invalid queued message ID"
+                        )
+                    await asyncio.to_thread(
+                        self.journal.update, row["identity"], "pending", message_id
                     )
-                except RpcCallError:
-                    self.session.wake.set()
-                    continue
-                if type(message_id) is not int or message_id <= 9:
-                    raise SessionError("Chatmail returned an invalid queued message ID")
-                await asyncio.to_thread(
-                    self.journal.update, row["identity"], "pending", message_id
+                    row["status"], row["native"] = "pending", message_id
+            if row["status"] == "rejected":
+                feedback = DeferredHandoffFailed(
+                    attempt_provenance=provenance,
+                    outcome="permanent_failed",
+                    error="Chatmail destination is not configured or has no eligible contacts",
                 )
-                row["status"], row["native"] = "pending", message_id
-            if row["status"] in {"submitting", "abandoned"}:
+            elif row["status"] in {"submitting", "abandoned"}:
                 feedback = DeferredHandoffFailed(
                     attempt_provenance=provenance,
                     outcome="abandoned",
@@ -394,8 +444,17 @@ class ChatmailAdapter(AdapterContract):
                 self.session.wake.clear()
                 if not self.session.alive():
                     raise SessionError("Chatmail native process is unavailable")
-                await self._scan()
+                scan_error: Exception | None = None
+                try:
+                    await self._scan()
+                except (asyncio.CancelledError, SessionError, AdapterPermanentError):
+                    raise
+                except Exception as exc:
+                    scan_error = exc
+                # Ingress failure must not starve already queued outbound work.
                 await self._flush()
+                if scan_error is not None:
+                    raise scan_error
                 connectivity = await self.session.call(
                     "get_connectivity", self.config.account_id
                 )
@@ -427,6 +486,13 @@ class ChatmailAdapter(AdapterContract):
                     return
                 except Exception:
                     self._state = "degraded"
+                    # A reconnect may fail after stop_io or some cursors have
+                    # been loaded. The next attempt must start a fresh session.
+                    try:
+                        await self.session.stop()
+                    except Exception:
+                        self._state = "failed"
+                        return
             except Exception:
                 # Storage/admission/feedback remains owned by its durable
                 # source. Retry without discarding native or queued work.

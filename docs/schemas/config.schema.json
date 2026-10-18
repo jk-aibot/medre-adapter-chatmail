@@ -64,6 +64,6 @@
       "type": "string"
     }
   },
-  "required": ["adapter_id"],
+  "required": [],
   "additionalProperties": false
 }

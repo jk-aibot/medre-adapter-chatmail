@@ -157,13 +157,19 @@ async def execute(
                 )
             await session.call("start_io", account)
             conversation = await session.call("secure_join", account, qr)
-            async with asyncio.timeout(config.rpc_timeout_seconds):
-                while not await session.call("can_send", account, conversation):
-                    session.wake.clear()
-                    try:
-                        await asyncio.wait_for(session.wake.wait(), 1.0)
-                    except TimeoutError:
-                        pass
+            try:
+                async with asyncio.timeout(config.rpc_timeout_seconds):
+                    while not await session.call("can_send", account, conversation):
+                        session.wake.clear()
+                        try:
+                            await asyncio.wait_for(session.wake.wait(), 1.0)
+                        except TimeoutError:
+                            pass
+            except TimeoutError:
+                raise ValueError(
+                    f"Chatmail join is pending for chat {conversation}; "
+                    "check medre-chatmail chats before retrying"
+                ) from None
             return {"chat_id": conversation, "can_send": True}
         entries = await session.call("get_chatlist_entries", account, None, None, None)
         chats = []

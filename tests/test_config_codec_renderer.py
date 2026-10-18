@@ -200,3 +200,20 @@ def test_schemas_follow_configuration_and_native_shapes(config):
     Draft202012Validator(native).validate(
         msgspec.to_builtins(event.metadata.native.data["chatmail"])
     )
+
+
+def test_editor_schema_accepts_actual_sample_adapter_block():
+    import json
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+    from medre.adapters.chatmail.sample import sample_config
+
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "docs/schemas/config.schema.json"
+        ).read_text()
+    )
+    sample = sample_config()
+    # Adapter instance IDs belong to the enclosing MEDRE transport map.
+    Draft202012Validator(schema).validate(sample.config)

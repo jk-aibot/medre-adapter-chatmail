@@ -56,7 +56,7 @@ def build_rpc(accounts_dir: str, executable: str, notify: Callable[[], None]) ->
                 while events := self.get_next_event_batch():
                     if self.closing:
                         return
-                    if events:
+                    if _should_wake(events):
                         notify()
             except Exception:
                 if not self.closing:
@@ -68,6 +68,31 @@ def build_rpc(accounts_dir: str, executable: str, notify: Callable[[], None]) ->
     return BridgeRpc(
         accounts_dir, rpc_server_path=executable, stderr=subprocess.DEVNULL
     )
+
+
+# Native 2.63.0 batches include records with an ``event.kind`` tag.
+# Ignore only recognized diagnostic/idle events: unknown event types must wake
+# the scanner so new SDK events cannot cause silent message loss.
+_IDLE_EVENTS = frozenset(
+    {
+        "Info",
+        "Warning",
+        "Error",
+        "ImapInboxIdle",
+    }
+)
+
+
+def _should_wake(events: object) -> bool:
+    if not isinstance(events, list):
+        return True
+    for item in events:
+        if not isinstance(item, dict):
+            return True
+        event = item.get("event")
+        if not isinstance(event, dict) or event.get("kind") not in _IDLE_EVENTS:
+            return True
+    return False
 
 
 class ChatmailSession:

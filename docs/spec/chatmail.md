@@ -27,9 +27,15 @@ preserved when present. Complete eligible text is admitted through the core's
 durable admission seam before its cursor advances. A checkpoint failure MUST
 leave the message retryable with the same canonical identity. A partial text
 message MUST NOT advance its cursor; other chats may continue independently.
+`Available` text triggers one native full-download request until its state changes.
+`Failure` remains retryable pending further native action, while
+`Undecipherable` is terminal and advances without a text admission. New native
+message IDs can replace an incomplete item after download.
 
 SDK notifications are coalesced into a wakeup rather than retained in unbounded
-Python account queues. Native storage remains the recovery source. A scan batch
+Python account queues. Diagnostic-only event batches do not trigger a full
+history scan; unknown event kinds still wake the scanner, and the interval poll
+remains a fallback. Native storage remains the recovery source. A scan batch
 handles at most 32 messages per chat before yielding to outbound processing.
 The native API enumerates a chat's IDs without pagination; large chat histories
 therefore have enumeration cost even though payload processing is bounded.
@@ -64,7 +70,11 @@ The journal is adapter evidence, not authority over core outbox or retry state.
 Native blocking operations execute outside the event loop with bounded waits.
 Timeout and cancellation terminate the owned native process and drain its client
 threads. Transient session failure reconnects through a fresh profile-owning
-session. Shutdown stops ingress and retains pending native correlation.
+session. Partial reconnect setup is torn down on failure; cursor maps are
+published only after every configured chat passes validation and native I/O
+has started. A failed admission or checkpoint for one chat leaves that chat
+retryable without preventing other chats from progressing or outgoing feedback
+from being flushed. Shutdown stops ingress and retains pending native correlation.
 Diagnostics MUST omit private paths, QR payloads and credentials.
 
 Capabilities advertise text, direct and group conversations, store-and-forward,

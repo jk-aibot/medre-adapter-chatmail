@@ -39,11 +39,16 @@ class ProfileLease:
         try:
             self.connection.execute("PRAGMA busy_timeout=0")
             self.connection.execute("BEGIN EXCLUSIVE")
+        except sqlite3.OperationalError as exc:
+            self.connection.close()
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise RuntimeError(
+                    "Chatmail profile is in use by another MEDRE command"
+                ) from None
+            raise
         except BaseException:
             self.connection.close()
-            raise RuntimeError(
-                "Chatmail profile is in use by another MEDRE command"
-            ) from None
+            raise
 
     def close(self) -> None:
         self.connection.close()
