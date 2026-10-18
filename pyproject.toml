@@ -1,0 +1,59 @@
+[project]
+name = "medre-adapter-chatmail"
+version = "0.1.0"
+description = "Chatmail conversations for MEDRE through the official core RPC client"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = ["Typing :: Typed"]
+dependencies = [
+  "medre>=0.1.0,<0.2.0",
+  "deltachat-rpc-client==2.63.0",
+  "deltachat-rpc-server==2.63.0",
+]
+
+[project.entry-points."medre.adapters"]
+chatmail = "medre.adapters.chatmail.plugin:adapter_spec"
+
+[project.optional-dependencies]
+test = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-timeout==2.4.0",
+  "pytest-cov==7.1.0",
+  "jsonschema==4.26.0",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"medre.adapters.chatmail" = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["error"]
+timeout = 30
+addopts = "-m 'not chatmail_sdk and not live'"
+markers = [
+  "chatmail_sdk: contracts against the released RPC client and native server",
+  "live: opt-in tests against an explicitly configured Chatmail relay",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9", "B", "ASYNC", "RUF100"]
+# Lifecycle timeout parameters implement the MEDRE contract.
+ignore = ["ASYNC109"]
+
+[tool.black]
+target-version = ["py311"]

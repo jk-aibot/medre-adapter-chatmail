@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Chatmail native metadata version 1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "account_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "chat_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "message_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "contact_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sender_label": {
+      "type": "string"
+    },
+    "encrypted_and_signed": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "profile_id",
+    "account_id",
+    "chat_id",
+    "message_id",
+    "contact_id",
+    "sender_label",
+    "encrypted_and_signed"
+  ],
+  "additionalProperties": false
+}

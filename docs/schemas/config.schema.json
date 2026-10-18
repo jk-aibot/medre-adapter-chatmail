@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jeremiah-k/medre-adapter-chatmail/blob/main/docs/schemas/config.schema.json",
+  "title": "Chatmail adapter configuration",
+  "type": "object",
+  "properties": {
+    "adapter_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "adapter_kind": {
+      "enum": ["real", "fake"]
+    },
+    "accounts_dir": {
+      "type": "string"
+    },
+    "account_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "chats": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 4294967295
+      },
+      "uniqueItems": true
+    },
+    "state_dir": {
+      "type": "string"
+    },
+    "rpc_server_path": {
+      "type": "string"
+    },
+    "rpc_timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "poll_interval_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "reconnect_delay_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "max_text_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_pending": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "origin_label": {
+      "type": "string"
+    },
+    "relay_prefix": {
+      "type": "string"
+    }
+  },
+  "required": ["adapter_id"],
+  "additionalProperties": false
+}
