@@ -1,0 +1,102 @@
+name: Adapter tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: Exact MEDRE revision to qualify for this run (defaults to main)
+        type: string
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        mode: [fake, sdk]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jeremiah-k/medre
+          ref: ${{ inputs.core_ref || 'main' }}
+          path: .core
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version-file: .core/.tool-versions
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: |
+            .core/uv.lock
+            pyproject.toml
+      - name: Record the qualified revision pair
+        run: |
+          core_sha=$(git -C .core rev-parse HEAD)
+          adapter_sha=$(git rev-parse HEAD)
+          echo "Core: ${core_sha}; adapter: ${adapter_sha}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check Python quality and whitespace
+        if: matrix.mode == 'fake' && matrix.python == '3.13'
+        run: |
+          uvx --from ruff==0.16.9 ruff check src tests
+          uvx --from black==26.5.1 black --check src tests
+          git show --format= --check HEAD
+      - name: Install locked core test environment
+        run: uv sync --project .core --locked --extra dev
+      - name: Install SDK-free provider
+        if: matrix.mode == 'fake'
+        run: uv pip install --python .core/.venv/bin/python --no-deps -e .
+      - name: Install provider and pinned native SDK
+        if: matrix.mode == 'sdk'
+        run: |
+          uv export --project .core --locked --extra dev --no-emit-project --no-hashes --output-file .core/sdk-constraints.txt
+          .core/.venv/bin/python - <<'PYCODE'
+          import pathlib, tomllib
+          from packaging.requirements import Requirement
+          project = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']
+          sdk = [item for item in project['dependencies'] if Requirement(item).name != 'medre']
+          pathlib.Path('.core/sdk-requirements.txt').write_text('\n'.join(sdk) + '\n')
+          PYCODE
+          uv pip install --python .core/.venv/bin/python --constraint .core/sdk-constraints.txt -r .core/sdk-requirements.txt
+          uv pip install --python .core/.venv/bin/python --no-deps -e .
+      - name: Run deterministic provider contracts
+        if: matrix.mode == 'fake'
+        run: .core/.venv/bin/python -m pytest -q -ra --cov=medre.adapters.chatmail --cov-branch --cov-report=xml:coverage-fake.xml --junitxml=junit-fake.xml
+      - name: Run pinned SDK contracts
+        if: matrix.mode == 'sdk'
+        run: .core/.venv/bin/python -m pytest -q -m chatmail_sdk --cov=medre.adapters.chatmail --cov-branch --cov-report=xml:coverage-sdk.xml --junitxml=junit-sdk.xml
+      - name: Prove fake routing through the installed CLI
+        if: matrix.mode == 'fake'
+        env:
+          MEDRE_HOME: ${{ runner.temp }}/chatmail-smoke-state
+        run: |
+          .core/.venv/bin/python -m medre config sample > .core/chatmail-smoke.yaml
+          .core/.venv/bin/python -m medre smoke --config .core/chatmail-smoke.yaml --json
+      - name: Build and inspect the installed wheel
+        if: matrix.mode == 'fake' && matrix.python == '3.13'
+        run: |
+          .core/.venv/bin/python -m build --wheel
+          uv pip install --python .core/.venv/bin/python --no-deps --force-reinstall dist/*.whl
+          .core/.venv/bin/python -I -c "from importlib.metadata import distribution; s = next(e for e in distribution('medre-adapter-chatmail').entry_points if e.group == 'medre.adapters').load()(); assert s.transport == 'chatmail'; assert s.config.load().__module__ == 'medre.adapters.chatmail.config'"
+      - name: Upload provider coverage
+        if: ${{ !cancelled() && matrix.python == '3.13' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage-${{ matrix.mode }}.xml
+          flags: ${{ matrix.mode }}
+          fail_ci_if_error: false
+      - name: Upload provider test results
+        if: ${{ !cancelled() && matrix.python == '3.13' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit-${{ matrix.mode }}.xml
+          report_type: test_results
